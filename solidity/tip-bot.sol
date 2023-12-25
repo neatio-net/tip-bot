@@ -1,9 +1,9 @@
-
 // SPDX-License-Identifier: MIT
 pragma solidity >=0.7.0 <0.9.0;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
-contract Tip{
+contract Tip is ReentrancyGuard{
     address public  owner;
     address public signup_confirmer;
     uint public  neat_balance = 0;
@@ -35,9 +35,6 @@ contract Tip{
         signup_confirmer = _signup_confirmer;
     }
 
-    receive() external payable { 
-        neat_balance+=msg.value;
-    }
 
 //--------Modifiers
     modifier isOwner{
@@ -46,6 +43,11 @@ contract Tip{
     }
     modifier isSignUpConfirmer{
         require(msg.sender == signup_confirmer,"You do not have authority to perform this transaction");
+        _;
+    }
+    
+    modifier userMustExist(uint userId) {
+        require(!isZeroAddress(users[userId].wallet_address), "User must be set up before tip can be claimed");
         _;
     }
 //------------Admin setup--------
@@ -61,42 +63,58 @@ contract Tip{
         emit ProfileAddressSet(_wallet, _user);
     }
 //-------------Transactions----------
-    function send_tip(uint _receiver,uint _amount,uint _sender)external payable{
-        require(_amount <= msg.value,"Sending amount exceeded available balance");
-        if(!isZeroAddress(users[_receiver].wallet_address)){
-         history[hist_count] = UserHistory({_receiver:_receiver,_sender:_sender,_amount:_amount,_claimed:true,_reverted:false});
+    function sendTip(uint receiver, uint amount, uint sender) external payable nonReentrant {
+        require(amount <= msg.value, "Sending amount exceeded available balance");
+        
+        if (!isZeroAddress(users[receiver].wallet_address)) {
+            history[hist_count] = UserHistory({
+                _receiver: receiver,
+                _sender: sender,
+                _amount: amount,
+                _claimed: true,
+                _reverted: false
+            });
+
             hist_count++;
-            users[_receiver].history.push(hist_count);
-        users[_sender].history.push(hist_count);
-            payable (users[_receiver].wallet_address).transfer(_amount);
-            emit SentTip(_sender, _receiver, _amount, true);
-            return;
+            users[receiver].history.push(hist_count);
+            users[sender].history.push(hist_count);
+            payable(users[receiver].wallet_address).transfer(amount);
+            emit SentTip(sender, receiver, amount, true);
+        } else {
+            neat_balance += msg.value;
+            history[hist_count] = UserHistory({
+                _receiver: receiver,
+                _sender: sender,
+                _amount: amount,
+                _claimed: false,
+                _reverted: false
+            });
+
+            users[receiver].history.push(hist_count);
+            users[sender].history.push(hist_count);
+            hist_count++;
+            emit SentTip(sender, receiver, amount, false);
         }
-        neat_balance+=msg.value;
-         history[hist_count] = UserHistory({_receiver:_receiver,_sender:_sender,_amount:_amount,_claimed:false,_reverted:false});
-        users[_receiver].history.push(hist_count);
-        users[_sender].history.push(hist_count);
-        hist_count++;
-        emit SentTip(_sender, _receiver, _amount, false);
     }
 
-    function revert_tip(uint _sender,uint _tip_index)public {
-        require(!isZeroAddress(users[_sender].wallet_address),"User must be setup before being tip can be claimed");
-        UserHistory memory _hist = history[users[_sender].history[_tip_index]];
-        require(!_hist._claimed,"Tip been claimed");
-        require(!_hist._reverted,"Tip been reverted");
-        history[users[_sender].history[_tip_index]]._reverted = true;
-        payable (users[_sender].wallet_address).transfer(_hist._amount);
-        emit RevertedPendingTip(_hist._sender, _hist._receiver, _hist._amount, true);
+    function revertTip(uint sender, uint tipIndex) external userMustExist(sender) nonReentrant {
+        UserHistory memory hist = history[users[sender].history[tipIndex]];
+        require(!hist._claimed, "Tip has been claimed");
+        require(!hist._reverted, "Tip has been reverted");
+
+        history[users[sender].history[tipIndex]]._reverted = true;
+        payable(users[sender].wallet_address).transfer(hist._amount);
+        emit RevertedPendingTip(hist._sender, hist._receiver, hist._amount, true);
     }
-    function claim_tip(uint _reciever,uint _tip_index)public {
-        require(!isZeroAddress(users[_reciever].wallet_address),"User must be setup before being tip can be claimed");
-        UserHistory memory _hist = history[users[_reciever].history[_tip_index]];
-        require(!_hist._claimed,"Tip been claimed");
-        require(!_hist._reverted,"Tip been reverted");
-        history[users[_reciever].history[_tip_index]]._claimed = true;
-        payable (users[_reciever].wallet_address).transfer(_hist._amount);
-        emit ClaimedPendingTip(_hist._sender, _hist._receiver, _hist._amount, true);
+
+    function claimTip(uint receiver, uint tipIndex) external userMustExist(receiver) nonReentrant {
+        UserHistory memory hist = history[users[receiver].history[tipIndex]];
+        require(!hist._claimed, "Tip has been claimed");
+        require(!hist._reverted, "Tip has been reverted");
+
+        history[users[receiver].history[tipIndex]]._claimed = true;
+        payable(users[receiver].wallet_address).transfer(hist._amount);
+        emit ClaimedPendingTip(hist._sender, hist._receiver, hist._amount, true);
     }
 
     function withdrawAllTokens(address _token,address _receiver)isOwner public {
